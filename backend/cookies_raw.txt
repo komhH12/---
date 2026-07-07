@@ -1,0 +1,26 @@
+3PcFlag	1783260867105	.taobao.com	/	2026-07-15T22:14:21.075Z	20		✓	None			Medium	
+XSRF-TOKEN	d4fdf22f-b625-4c7a-8064-54c7405f0ed4	pc-growht-rta.taobao.com	/	Session	46	✓	✓				Medium	
+_cc_	VFC%2FuZ9ajQ%3D%3D	.taobao.com	/	2027-07-05T22:14:39.335Z	22		✓	None			Medium	
+_hvn_lgc_	0	.taobao.com	/	2027-06-30T22:14:41.574Z	10		✓	None			Medium	
+_l_g_	Ug%3D%3D	.tmall.hk	/	Session	13		✓	None			Medium	
+_l_g_	Ug%3D%3D	.fliggy.com	/	Session	13		✓	None			Medium	
+_l_g_	Ug%3D%3D	.tmall.com	/	Session	13		✓	None			Medium	
+_l_g_	Ug%3D%3D	.taobao.com	/	2026-08-04T14:14:39.335Z	13		✓	None			Medium	
+_m_h5_tk	11742bf4fd92fd5b30443e20136caf14_1783270555577	.taobao.com	/	2026-07-05T15:43:49.544Z	54		✓	None			Medium	
+_m_h5_tk_enc	22c89eb7498df6f7188ebe43e2852887	.taobao.com	/	2026-07-05T15:43:49.544Z	44		✓	None			Medium	
+_nk_	tb408550080855	.taobao.com	/	2026-08-04T14:14:39.335Z	18		✓	None			Medium	
+_nk_	tb408550080855	.fliggy.com	/	Session	18		✓	None			Medium	
+_nk_	tb408550080855	.tmall.com	/	Session	18		✓	None			Medium	
+_nk_	tb408550080855	.tmall.hk	/	Session	18		✓	None			Medium	
+_samesite_flag_	true	.taobao.com	/	Session	19	✓	✓	None			Medium	
+_tb_token_	7333b30377163	.fliggy.com	/	Session	23		✓	None			Medium	
+_tb_token_	7333b30377163	.tmall.com	/	Session	23		✓	None			Medium	
+_tb_token_	7333b30377163	.tmall.hk	/	Session	23		✓	None			Medium	
+_tb_token_	7333b30377163	.taobao.com	/	2026-08-04T14:14:39.335Z	23		✓	None			Medium	
+arms_uid	f0a7bb77-92e6-43eb-83c0-cd1d78724dae	www.taobao.com	/	2027-01-01T14:13:49.411Z	44		✓	None	https://taobao.com		Medium	
+atpsida	3b043dbde40fa2efbbac9a1e_1783260889_7	.mmstat.com	/	Session	44		✓	None	https://taobao.com	✓	Medium	
+aui	2222724927061	.taobao.com	/	2027-08-09T14:14:40.488Z	16						Medium	
+aui	2222724927061	.mmstat.com	/	2027-08-09T14:17:42.936Z	16		✓	None	https://taobao.com	✓	Medium	
+cancelledSubSites	empty	.tmall.hk	/	Session	22		✓	None			Medium	
+cancelledSubSites	empty	.taobao.com	/	2026-08-04T14:14:39.335Z	22		✓	None			Medium	
+cancelledSubSites	empty	.tmall.com	/	Session	22		✓	None			Medium

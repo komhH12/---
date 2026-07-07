@@ -1,0 +1,14 @@
+2026/07/06-01:31:34.588 b83c Reusing MANIFEST C:\Users\12296\Projects\taobao-shop-scraper\backend\.chrome-profile\Default\Local Storage\leveldb/MANIFEST-000001
+2026/07/06-01:31:34.601 b83c Recovering log #281
+2026/07/06-01:31:34.602 b83c Level-0 table #283: started
+2026/07/06-01:31:34.622 b83c Level-0 table #283: 41853 bytes OK
+2026/07/06-01:31:34.636 b83c Delete type=0 #281
+2026/07/06-01:31:34.638 c4dc Compacting 4@0 + 1@1 files
+2026/07/06-01:31:34.666 c4dc Generated table #285@0: 92 keys, 918465 bytes
+2026/07/06-01:31:34.666 c4dc Compacted 4@0 + 1@1 files => 918465 bytes
+2026/07/06-01:31:34.667 c4dc compacted to: files[ 0 1 0 0 0 0 0 ]
+2026/07/06-01:31:34.668 c4dc Delete type=2 #272
+2026/07/06-01:31:34.668 c4dc Delete type=2 #274
+2026/07/06-01:31:34.668 c4dc Delete type=2 #277
+2026/07/06-01:31:34.669 c4dc Delete type=2 #280
+2026/07/06-01:31:34.669 c4dc Delete type=2 #283

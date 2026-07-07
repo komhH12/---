@@ -1,0 +1,8 @@
+node_modules/
+.browser-profile/
+terminals/
+agent-tools/
+search-results.json
+*.log
+.DS_Store
+Thumbs.db
