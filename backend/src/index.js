@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { openForLogin, checkLoggedIn, search, searchAll, resumeSearch, getProgress, clearProgress } = require('./scraper');
+const { openForLogin, checkLoggedIn, search, searchAll, resumeSearch, getProgress, clearProgress, requestStop } = require('./scraper');
 
 console.log(`[Startup] Infinite scroll + CAPTCHA detection + Resume`);
 
@@ -25,17 +25,18 @@ app.post('/api/login', async (_req, res) => {
 });
 
 app.post('/api/search', async (req, res) => {
-  const { keyword, keywords, minFollowers } = req.body;
+  const { keyword, keywords, minFollowers, scrollMode } = req.body;
   const min = parseInt(minFollowers) || 300000;
+  const mode = scrollMode || 'semi'; // default semi-auto (manual scroll trigger)
 
   try {
     let results;
     if (keywords && Array.isArray(keywords) && keywords.length > 0) {
-      console.log(`[Search] Multi-keyword: ${keywords.length} words, min: ${min}`);
-      results = await searchAll(keywords, min);
+      console.log(`[Search] Multi-keyword: ${keywords.length} words, min: ${min}, mode: ${mode}`);
+      results = await searchAll(keywords, min, mode);
     } else if (keyword) {
-      console.log(`[Search] "${keyword}", min: ${min}`);
-      results = await search(keyword, min);
+      console.log(`[Search] "${keyword}", min: ${min}, mode: ${mode}`);
+      results = await search(keyword, min, mode);
     } else {
       return res.status(400).json({ error: '请提供搜索关键词' });
     }
@@ -126,6 +127,13 @@ app.get('/api/search/progress', (_req, res) => {
   const data = getProgress();
   if (!data) return res.json({ hasProgress: false });
   res.json({ hasProgress: true, ...data });
+});
+
+// Stop endpoint — sets the global stop flag
+app.post('/api/search/stop', (_req, res) => {
+  console.log('[Stop] Stop signal received');
+  requestStop();
+  res.json({ success: true, message: '停止信号已发送，将在当前关键词完成后停止' });
 });
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));

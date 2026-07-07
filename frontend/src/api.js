@@ -11,7 +11,8 @@ async function fetchJSON(method, url, body) {
 
 export const getStatus  = () => fetchJSON('GET',  `${API}/status`);
 export const startLogin = () => fetchJSON('POST', `${API}/login`);
-export const search     = (k, m)   => fetchJSON('POST', `${API}/search`, { keyword: k,       minFollowers: m });
-export const searchMulti = (kw, m) => fetchJSON('POST', `${API}/search`, { keywords: kw,     minFollowers: m });
-export const resumeSearch = ()     => fetchJSON('POST', `${API}/search/resume`);
-export const getProgress  = ()     => fetchJSON('GET',  `${API}/search/progress`);
+export const search     = (k, m, s)   => fetchJSON('POST', `${API}/search`, { keyword: k,       minFollowers: m, scrollMode: s });
+export const searchMulti = (kw, m, s) => fetchJSON('POST', `${API}/search`, { keywords: kw,     minFollowers: m, scrollMode: s });
+export const resumeSearch = ()        => fetchJSON('POST', `${API}/search/resume`);
+export const getProgress  = ()        => fetchJSON('GET',  `${API}/search/progress`);
+export const stopSearch   = ()        => fetchJSON('POST', `${API}/search/stop`);

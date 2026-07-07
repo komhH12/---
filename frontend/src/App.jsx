@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
-import { getStatus, startLogin, search, searchMulti, resumeSearch, getProgress } from './api';
-import { exportWord, exportPDF } from './export';
+import { getStatus, startLogin, search, searchMulti, resumeSearch, getProgress, stopSearch } from './api';
+import { exportWord, exportPDF, exportExcel } from './export';
 
 const CATS = [
   { id: 'all', label: '全部品类 (14品类)', kw: ['女装','男装','手机','化妆品','零食','家居','运动','母婴','家电','鞋靴','珠宝','内衣','食品','箱包'] },
@@ -35,6 +35,12 @@ export default function App() {
   const [searchedKw, setSearchedKw] = useState('');
   const [page, setPage] = useState(1);
   const PAGE = 30;
+
+  // Scroll mode: 'semi' = scrollTo (needs manual trigger), 'auto' = mouse.wheel events
+  const [scrollMode, setScrollMode] = useState('semi');
+
+  // Stop button
+  const [stopBusy, setStopBusy] = useState(false);
 
   // CAPTCHA state
   const [captcha, setCaptcha] = useState(null); // { message, keyword, progress, shopsSoFar }
@@ -106,6 +112,13 @@ export default function App() {
     finally { setCaptchaBusy(false); }
   }, []);
 
+  const doStop = useCallback(async () => {
+    setStopBusy(true);
+    try { await stopSearch(); }
+    catch (_) {}
+    finally { setStopBusy(false); }
+  }, []);
+
   const runSearch = useCallback(async (e) => {
     e?.preventDefault();
     setErr(''); setCaptcha(null); setLoading(true); setResults([]); setPage(1);
@@ -116,7 +129,7 @@ export default function App() {
         const s = await getStatus();
         setLoggedIn(s.loggedIn);
         if (!s.loggedIn) { setErr('请先登录 — 点击导航栏的「连接淘宝」'); setLoading(false); return; }
-        const d = await searchMulti(cat.kw.slice(0, 10), minFans);
+        const d = await searchMulti(cat.kw.slice(0, 10), minFans, scrollMode);
         if (d.captcha) { handleCaptcha({ message: d.error, keyword: d.keyword, progress: d.progress, shopsSoFar: d.shopsSoFar }); return; }
         if (d.browserClosed) {
           setErr(d.error);
@@ -146,8 +159,8 @@ export default function App() {
     setSearchedKw(finalKw);
     try {
       let d;
-      if (searchKws.length > 1) d = await searchMulti(searchKws, minFans);
-      else d = await search(finalKw, minFans);
+      if (searchKws.length > 1) d = await searchMulti(searchKws, minFans, scrollMode);
+      else d = await search(finalKw, minFans, scrollMode);
       if (d.captcha) { handleCaptcha({ message: d.error, keyword: d.keyword, progress: d.progress, shopsSoFar: d.shopsSoFar }); return; }
       if (d.browserClosed) {
         setErr(d.error);
@@ -276,11 +289,32 @@ export default function App() {
                 <option value="5000000">500 万</option>
               </select>
             </div>
+
+            <div className="w-[140px]">
+              <label className="block text-[11px] font-bold text-[var(--color-ink-muted)] uppercase tracking-[0.1em] mb-2">滚动方式</label>
+              <select value={scrollMode} onChange={e => setScrollMode(e.target.value)}
+                className="w-full h-12 px-4 bg-[var(--color-page)] border border-[var(--color-line)] rounded-xl text-sm
+                  focus:outline-none focus:ring-2 focus:ring-[var(--color-brand)]/20 focus:border-[var(--color-brand)]
+                  appearance-none cursor-pointer"
+                style={{backgroundImage:`url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7280' stroke-width='1.5'/%3E%3C/svg%3E")`,backgroundRepeat:'no-repeat',backgroundPosition:'right 12px center'}}>
+                <option value="semi">半人工 (反爬最低)</option>
+                <option value="auto">全自动 (无需操作)</option>
+              </select>
+            </div>
+
             <button type="submit" disabled={loading}
               className={`h-12 px-6 rounded-xl text-sm font-bold inline-flex items-center gap-2 transition-all active:scale-[0.96] cursor-pointer shadow-sm
                 ${loading ? 'bg-[var(--color-line-subtle)] text-[var(--color-ink-muted)] cursor-wait' : 'bg-[var(--color-brand)] hover:bg-[var(--color-brand-strong)] text-white'}`}>
               {loading ? <>{SPIN} 搜索中...</> : <>{SearchIcon} 搜索</>}
             </button>
+
+            {loading && (
+              <button type="button" onClick={doStop} disabled={stopBusy}
+                className="h-12 px-5 rounded-xl text-sm font-bold inline-flex items-center gap-2 transition-all active:scale-[0.96] cursor-pointer shadow-sm
+                  bg-red-500 hover:bg-red-600 text-white disabled:opacity-50">
+                {stopBusy ? <>{SPIN} 终止中...</> : <><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg> 终止</>}
+              </button>
+            )}
           </form>
         </div>
 
@@ -336,6 +370,12 @@ export default function App() {
                   title="导出为 Word 文档">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
                   Word
+                </button>
+                <button onClick={() => exportExcel(currentResults, searchedKw, minFans)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-xl border border-green-200 bg-green-50 text-green-700 hover:bg-green-100 transition-colors cursor-pointer"
+                  title="导出为 Excel (CSV)">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+                  Excel
                 </button>
                 <button onClick={() => exportPDF(currentResults, searchedKw, minFans)}
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-xl border border-red-200 bg-red-50 text-red-700 hover:bg-red-100 transition-colors cursor-pointer"
@@ -433,7 +473,7 @@ export default function App() {
       <div className="border-t border-[var(--color-line)] bg-white py-4 mt-auto">
         <div className="max-w-7xl mx-auto px-8 flex items-center justify-between text-[11px] text-zinc-300">
           <span>数据来源：淘宝网 · 仅供内部使用</span>
-          <span>v6.1 — Live Save</span>
+          <span>v7.0 — Dual Scroll Mode</span>
         </div>
       </div>
     </div>

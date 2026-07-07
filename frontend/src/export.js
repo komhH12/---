@@ -62,6 +62,32 @@ export function exportWord(results, searchedKw, minFans) {
   URL.revokeObjectURL(a.href);
 }
 
+function csvEscape(val) {
+  const s = String(val ?? '');
+  if (/[,"\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+
+export function exportExcel(results, searchedKw, minFans) {
+  const date = new Date().toISOString().slice(0, 10);
+  const filename = `淘宝店铺查询_${searchedKw}_${date}.csv`;
+  const header = ['排名', '店铺名称', '粉丝数', '品类', '店铺链接'];
+  const rows = results.map((s, i) => [
+    i + 1,
+    s.shopName,
+    fmt(s.followers),
+    s.categoryLabel || '综合',
+    s.url || '',
+  ]);
+  const csv = '\ufeff' + header.join(',') + '\n' + rows.map(r => r.map(csvEscape).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
 /**
  * Export results as PDF — opens browser print dialog with print-optimized layout.
  */

@@ -22,6 +22,18 @@ const PROGRESS_FILE = path.join(__dirname, '..', 'search-results.json');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const rand = (min, max) => min + Math.random() * (max - min);
 
+// ── Search stop control ─────────────────────────────────────
+let stopRequested = false;
+
+function requestStop() {
+  stopRequested = true;
+  console.log('[Stop] Stop requested — will finish current keyword then stop');
+}
+
+function resetStop() {
+  stopRequested = false;
+}
+
 const USER_AGENTS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
@@ -136,6 +148,35 @@ async function humanWander(page) {
   await humanMove(page, Math.floor(rand(200, vp.width - 200)), Math.floor(rand(200, vp.height - 200)), Math.floor(rand(8, 15)));
 }
 
+// ── Auto Scroll (visually smooth scrollBy steps) ───────────
+async function autoScroll(page) {
+  try {
+    const vp = page.viewportSize() || { width: 1920, height: 1080 };
+
+    // 1. Position mouse in content area
+    const mx = Math.floor(vp.width / 2 + rand(-100, 100));
+    const my = Math.floor(vp.height * 0.6 + rand(-50, 50));
+    await page.mouse.move(mx, my, { steps: Math.floor(rand(4, 7)) });
+
+    // 2. scrollBy small increments (4-7px) × 50-70 steps = 200-490px total
+    //   100-180ms between steps = visible natural scroll
+    const steps = Math.floor(rand(50, 71));
+    const dy = Math.floor(rand(4, 8));
+    for (let i = 0; i < steps; i++) {
+      await page.evaluate((y) => window.scrollBy(0, y), dy);
+      await sleep(rand(100, 180));
+    }
+
+    // 3. Bounce up slightly to trigger lazy-load
+    await page.evaluate((y) => window.scrollBy(0, -y), Math.floor(rand(30, 60)));
+    await sleep(rand(200, 400));
+
+    // 4. Final small scroll-down pulse
+    await page.evaluate((y) => window.scrollBy(0, y), Math.floor(rand(40, 80)));
+    await sleep(rand(100, 200));
+  } catch (_) {}
+}
+
 // ── CAPTCHA Detection ──────────────────────────────────────
 const CAPTCHA_KEYWORDS = ['滑块验证', '验证码', '网络信号走丢', '访问太频繁', '请拖动滑块', '人机验证', '请完成验证'];
 const LOGIN_KEYWORDS = ['请登录', '免费注册'];
@@ -244,9 +285,9 @@ function extractCurrentShops(page) {
 
 /**
  * Full infinite-scroll search for one keyword.
- * Scrolls to bottom repeatedly until no new shops appear for 3 consecutive scrolls.
+ * @param {string} scrollMode - 'semi' (scrollTo bottom, needs manual scroll trigger) or 'auto' (mouse.wheel events)
  */
-async function infiniteScrollSearch(page, keyword) {
+async function infiniteScrollSearch(page, keyword, scrollMode = 'semi') {
   console.log(`  [1/5] Visiting taobao homepage`);
   try {
     await page.goto('https://www.taobao.com/', { waitUntil: 'domcontentloaded', timeout: 20000 });
@@ -257,14 +298,14 @@ async function infiniteScrollSearch(page, keyword) {
     console.log('  [1/5] Homepage failed, going to search directly');
   }
 
-  console.log(`  [2/5] Search: ${keyword}`);
+  console.log(`  [2/5] Search: ${keyword} (mode: ${scrollMode})`);
   const url = `https://s.taobao.com/search?q=${encodeURIComponent(keyword)}&tab=shop`;
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
   // Check CAPTCHA immediately after search result loads
   let state = await checkPageState(page);
   if (state === 'captcha') {
-    console.log(`\n  🔴🔴🔴 CAPTCHA DETECTED after search for "${keyword}" 🔴🔴🔴`);
+    console.log(`\n  🔴 CAPTCHA after search for "${keyword}"`);
     throw { captcha: true, message: `搜索"${keyword}"时触发人机验证，请在浏览器窗口中手动完成验证，然后点"已通过验证，继续"` };
   }
   if (state === 'login') throw new Error('登录过期，请重新连接');
@@ -272,16 +313,21 @@ async function infiniteScrollSearch(page, keyword) {
   // Wait for content to settle
   await sleep(rand(5000, 8000));
 
-  console.log(`  [3/5] Infinite scroll — loading all shops...`);
-  const allShops = new Map(); // shopId → { ... }
+  console.log(`  [3/5] Infinite scroll (${scrollMode}) — loading all shops...`);
+  const allShops = new Map();
   let noChangeRounds = 0;
   let totalScrolls = 0;
   const maxScrolls = 50;
 
   while (totalScrolls < maxScrolls) {
+    // ⚡ Check stop request EVERY iteration
+    if (stopRequested) {
+      console.log(`\n  🛑 Stop requested — returning ${allShops.size} shops collected so far`);
+      break;
+    }
     totalScrolls++;
 
-    // ⚡ Check CAPTCHA BEFORE EVERY scroll (not every 3rd)
+    // ⚡ Check CAPTCHA BEFORE EVERY scroll
     if (!(await isBrowserAlive())) {
       console.log(`\n  💀 Browser closed during scroll #${totalScrolls}`);
       throw new Error('浏览器窗口已关闭，请重新「连接淘宝」并开始搜索');
@@ -312,24 +358,34 @@ async function infiniteScrollSearch(page, keyword) {
       else { const existing = allShops.get(s.shopId); if (s.followers > existing.followers) allShops.set(s.shopId, s); }
     }
 
-    console.log(`    [Scroll #${totalScrolls}] ${allShops.size} unique shops (+${newCount} new)`);
+    console.log(`    [Scroll #${totalScrolls}] ${allShops.size} unique shops (+${newCount} new) ${scrollMode === 'auto' ? '[auto]' : '[semi]'}`);
 
     if (newCount === 0) {
       noChangeRounds++;
-      if (noChangeRounds >= 3) {
-        console.log(`    [Done] 3 rounds with 0 new shops — end of results`);
+      const threshold = scrollMode === 'auto' ? 4 : 3;
+      if (noChangeRounds >= threshold) {
+        console.log(`    [Done] ${threshold} rounds with 0 new shops — end of results`);
         break;
       }
     } else {
       noChangeRounds = 0;
     }
 
-    // Scroll to bottom — use scrollTo for full viewport jump
+    // ── Scroll action ──
     try {
-      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-      await sleep(rand(2500, 4500));
-      await humanWander(page);
-      await sleep(rand(1000, 2000));
+      if (scrollMode === 'auto') {
+        // Smooth scrollBy in small increments — one call = ~5-12s of visible creeping
+        await autoScroll(page);
+        await sleep(rand(1500, 3000));
+        await humanWander(page);
+        await sleep(rand(800, 1500));
+      } else {
+        // Semi: scrollTo bottom (need manual scroll to trigger)
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await sleep(rand(2500, 4500));
+        await humanWander(page);
+        await sleep(rand(1000, 2000));
+      }
     } catch (e) {
       if (!(await isBrowserAlive())) {
         console.log(`\n  💀 Browser closed during scroll/wait #${totalScrolls}`);
@@ -376,30 +432,34 @@ async function infiniteScrollSearch(page, keyword) {
 // ── Resumable Multi-Keyword Search ─────────────────────────
 let searchState = null; // { keywords, currentIndex, allShops, seenIds, minFollowers }
 
-async function searchKeywords(keywords, minFollowers, resumeFrom = 0) {
+async function searchKeywords(keywords, minFollowers, resumeFrom = 0, scrollMode = 'semi') {
   if (!searchState || resumeFrom === 0) {
-    searchState = { keywords: keywords.slice(0, 10), currentIndex: 0, allShops: [], seenIds: new Set(), minFollowers };
-    clearProgress(); // fresh start — clear old save
+    searchState = { keywords: keywords.slice(0, 10), currentIndex: 0, allShops: [], seenIds: new Set(), minFollowers, scrollMode };
+    clearProgress();
+    resetStop();
   } else {
     searchState.currentIndex = resumeFrom;
   }
 
   const { allShops, seenIds } = searchState;
   const kws = searchState.keywords;
-  console.log(`[SearchAll] ${kws.length} keywords (resuming from #${searchState.currentIndex + 1}): ${kws.join(', ')}`);
-
-  const remaining = kws.length - searchState.currentIndex;
+  console.log(`[SearchAll] ${kws.length} keywords (mode: ${scrollMode}) (resuming from #${searchState.currentIndex + 1}): ${kws.join(', ')}`);
 
   for (let i = searchState.currentIndex; i < kws.length; i++) {
+    // ⚡ Check stop before each keyword
+    if (stopRequested) {
+      console.log(`\n  🛑 Stop requested before keyword #${i + 1} — returning results now`);
+      break;
+    }
+
     const kw = kws[i];
     console.log(`\n  [${i + 1}/${kws.length}] "${kw}" — ${kws.length - i - 1} remaining`);
 
     let shops;
     try {
-      shops = await infiniteScrollSearch(loginPage, kw);
+      shops = await infiniteScrollSearch(loginPage, kw, scrollMode);
     } catch (e) {
       if (e.captcha) {
-        // Save checkpoint and throw to API layer
         searchState.currentIndex = i;
         searchState.allShops = allShops;
         searchState.seenIds = seenIds;
@@ -420,13 +480,13 @@ async function searchKeywords(keywords, minFollowers, resumeFrom = 0) {
     }
     console.log(`    ${shops.length} shops from "${kw}", ${allShops.length} total unique`);
 
-    // ── Real-time save to disk (anti-crash protection) ──
+    // ── Real-time save ──
     const classified = classifyResults(allShops, minFollowers);
     saveProgressFile(classified, i + 1, kws.length, kw);
 
     searchState.currentIndex = i + 1;
 
-    if (i < kws.length - 1) {
+    if (i < kws.length - 1 && !stopRequested) {
       const pause = rand(15000, 30000);
       console.log(`    [Pause] ${Math.round(pause / 1000)}s before next keyword...`);
       await humanWander(loginPage); await sleep(rand(3000, 5000));
@@ -435,9 +495,13 @@ async function searchKeywords(keywords, minFollowers, resumeFrom = 0) {
     }
   }
 
-  // Done — return to homepage
-  console.log('[SearchAll] Complete. Returning to homepage.');
-  try { await loginPage.goto('https://www.taobao.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }); } catch (_) {}
+  // Done — return to homepage (unless stopped by user)
+  if (!stopRequested) {
+    console.log('[SearchAll] Complete. Returning to homepage.');
+    try { await loginPage.goto('https://www.taobao.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }); } catch (_) {}
+  } else {
+    console.log('[SearchAll] Stopped by user. Keeping current page.');
+  }
 
   // Clear state
   searchState = null;
@@ -505,12 +569,13 @@ function clearProgress() {
 }
 
 // ── Core Search ─────────────────────────────────────────────
-async function search(keyword, minFollowers) {
+async function search(keyword, minFollowers, scrollMode = 'semi') {
   if (!browserContext || !loginPage) throw new Error('请先点击「连接淘宝」登录后再搜索');
+  resetStop();
 
   let shops;
   try {
-    shops = await infiniteScrollSearch(loginPage, keyword);
+    shops = await infiniteScrollSearch(loginPage, keyword, scrollMode);
   } catch (e) {
     if (e.captcha) throw e;
     throw e;
@@ -518,16 +583,16 @@ async function search(keyword, minFollowers) {
 
   console.log(`  Total: ${shops.length} shops`);
   const result = filterAndClassify(shops, minFollowers);
-  // Save progress for single-keyword search too
   saveProgressFile(result, 1, 1, keyword);
   try { await loginPage.goto('https://www.taobao.com/', { waitUntil: 'domcontentloaded', timeout: 10000 }); } catch (_) {}
-  clearProgress(); // single search done — clear save
+  clearProgress();
   return result;
 }
 
-async function searchAll(keywords, minFollowers) {
+async function searchAll(keywords, minFollowers, scrollMode = 'semi') {
   if (!browserContext || !loginPage) throw new Error('请先点击「连接淘宝」登录后再搜索');
-  return await searchKeywords(keywords, minFollowers, 0);
+  resetStop();
+  return await searchKeywords(keywords, minFollowers, 0, scrollMode);
 }
 
 // ── Export ──────────────────────────────────────────────────
@@ -574,4 +639,4 @@ async function checkShop(url) {
   } catch (e) { return { success: false, shopName: '查询失败', followers: 0, error: e.message }; }
 }
 
-module.exports = { openForLogin, checkLoggedIn, search, searchAll, resumeSearch, checkShop, getProgress, clearProgress };
+module.exports = { openForLogin, checkLoggedIn, search, searchAll, resumeSearch, checkShop, getProgress, clearProgress, requestStop, resetStop };
