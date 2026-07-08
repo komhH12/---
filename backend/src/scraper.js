@@ -22,6 +22,17 @@ const PROGRESS_FILE = path.join(__dirname, '..', 'search-results.json');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const rand = (min, max) => min + Math.random() * (max - min);
 
+// Breakable sleep — checks stopRequested every 500ms
+async function sleepBreakable(ms) {
+  if (ms <= 0) return;
+  const chunks = Math.ceil(ms / 500);
+  for (let c = 0; c < chunks; c++) {
+    const chunk = Math.min(ms - c * 500, 500);
+    await new Promise(r => setTimeout(r, chunk));
+    if (stopRequested) break;
+  }
+}
+
 // ── Search stop control ─────────────────────────────────────
 let stopRequested = false;
 
@@ -159,21 +170,27 @@ async function autoScroll(page) {
     await page.mouse.move(mx, my, { steps: Math.floor(rand(4, 7)) });
 
     // 2. scrollBy small increments (4-7px) × 50-70 steps = 200-490px total
-    //   100-180ms between steps = visible natural scroll
+    //   with stopRequested check every ~10 steps
     const steps = Math.floor(rand(50, 71));
     const dy = Math.floor(rand(4, 8));
     for (let i = 0; i < steps; i++) {
+      if (stopRequested) break;
       await page.evaluate((y) => window.scrollBy(0, y), dy);
       await sleep(rand(100, 180));
+      if (i > 0 && i % 10 === 0 && stopRequested) break;
     }
 
     // 3. Bounce up slightly to trigger lazy-load
-    await page.evaluate((y) => window.scrollBy(0, -y), Math.floor(rand(30, 60)));
-    await sleep(rand(200, 400));
+    if (!stopRequested) {
+      await page.evaluate((y) => window.scrollBy(0, -y), Math.floor(rand(30, 60)));
+      await sleep(rand(200, 400));
+    }
 
     // 4. Final small scroll-down pulse
-    await page.evaluate((y) => window.scrollBy(0, y), Math.floor(rand(40, 80)));
-    await sleep(rand(100, 200));
+    if (!stopRequested) {
+      await page.evaluate((y) => window.scrollBy(0, y), Math.floor(rand(40, 80)));
+      await sleep(rand(100, 200));
+    }
   } catch (_) {}
 }
 
@@ -221,17 +238,31 @@ function extractCurrentShops(page) {
   return safeEval(page, () => {
     const bodyText = (document.body && document.body.innerText) || '';
     const results = [];
-    const fanPattern = /(\d+(?:\.\d+)?)万粉丝/g;
-    let fm;
-    const entries = [];
-    while ((fm = fanPattern.exec(bodyText)) !== null) {
-      const pos = fm.index;
+
+    // Step 1: Find all "xx万粉丝" entries
+    const allFans = [...bodyText.matchAll(/(\d+(?:\.\d+)?)万粉丝/g)];
+
+    // Step 2: Find all "进入店铺" links with shop IDs
+    const shopLinks = [...document.querySelectorAll('a')]
+      .filter(a => (a.textContent || '').includes('进入店铺'))
+      .map(a => {
+        const m = (a.href || '').match(/shop(\d+)/);
+        return m ? m[1] : null;
+      }).filter(id => id);
+
+    // Step 3: Simple 1:1 zip — each fan entry paired with a shop link
+    const count = Math.min(allFans.length, shopLinks.length);
+    for (let i = 0; i < count; i++) {
+      const fm = allFans[i];
       const followers = Math.round(parseFloat(fm[1]) * 10000);
-      const before = bodyText.substring(Math.max(0, pos - 300), pos);
+
+      // Get shop name from the text before the fan count
+      const pos = fm.index;
+      const before = bodyText.substring(Math.max(0, pos - 200), pos);
       const lines = before.split('\n').filter(l => l.trim().length > 1);
       let name = '';
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const line = lines[i].trim();
+      for (let k = lines.length - 1; k >= 0; k--) {
+        const line = lines[k].trim();
         if (/^[\d.]+$/.test(line)) continue;
         if (line.length < 2) continue;
         if (/^(进入店铺|综合|销量|价格|好评|回头客|加载|Ctrl\+V|搜同款|所有宝贝|天猫|淘宝|店铺|企业购)/.test(line)) continue;
@@ -240,45 +271,27 @@ function extractCurrentShops(page) {
       }
       const after = bodyText.substring(pos, Math.min(bodyText.length, pos + 800));
       const productLines = after.split('\n').filter(l => l.trim().length > 1).slice(0, 10);
-      if (name) entries.push({ name, followers, pos, productContext: productLines.join(' ') });
-    }
 
-    // Match shops via "进入店铺" links
-    const linkSeen = new Set();
-    const uniqueLinks = [];
-    for (const link of document.querySelectorAll('a')) {
-      if (!(link.textContent || '').includes('进入店铺')) continue;
-      const href = link.href || '';
-      const idMatch = href.match(/shop(\d+)/);
-      if (!idMatch || linkSeen.has(idMatch[1])) continue;
-      linkSeen.add(idMatch[1]);
-      let card = link.parentElement;
-      for (let j = 0; j < 12 && card; j++) {
-        if ((card.textContent || '').length > 300) break;
-        card = card.parentElement;
+      // Extract prices
+      const ctx = before + ' ' + after;
+      const priceMatches = ctx.match(/[¥￥]\s*(\d+(?:\.\d{1,2})?)/g);
+      const prices = [];
+      if (priceMatches) for (const p of priceMatches) {
+        const n = parseFloat(p.replace(/[¥￥\s]/g, ''));
+        if (n > 0 && n < 200000) prices.push(n);
+        if (prices.length >= 7) break;
       }
-      uniqueLinks.push({ id: idMatch[1], context: card ? card.textContent.substring(0, 600) : '' });
-    }
+      const avgPrice = prices.length > 0 ? Math.round(prices.reduce((a,b)=>a+b,0) / prices.length) : 0;
 
-    const matchedEntries = new Set();
-    const matchedLinks = new Set();
-    for (const link of uniqueLinks) {
-      if (matchedLinks.has(link.id)) continue;
-      for (const entry of entries) {
-        if (matchedEntries.has(entry.name + entry.pos)) continue;
-        if (link.context.includes(entry.name)) {
-          results.push({ shopId: link.id, shopName: entry.name, followers: entry.followers, productContext: entry.productContext });
-          matchedEntries.add(entry.name + entry.pos);
-          matchedLinks.add(link.id);
-          break;
-        }
-      }
+      results.push({
+        shopId: shopLinks[i],
+        shopName: name || ('店铺' + shopLinks[i]),
+        followers,
+        productContext: productLines.join(' '),
+        avgPrice,
+        priceCount: prices.length,
+      });
     }
-    // Unmatched fallback
-    const umE = entries.filter(e => !matchedEntries.has(e.name + e.pos));
-    const umL = uniqueLinks.filter(l => !matchedLinks.has(l.id));
-    for (let i = 0; i < Math.min(umE.length, umL.length); i++)
-      results.push({ shopId: umL[i].id, shopName: umE[i].name, followers: umE[i].followers, productContext: umE[i].productContext });
     return results;
   });
 }
@@ -291,9 +304,10 @@ async function infiniteScrollSearch(page, keyword, scrollMode = 'semi') {
   console.log(`  [1/5] Visiting taobao homepage`);
   try {
     await page.goto('https://www.taobao.com/', { waitUntil: 'domcontentloaded', timeout: 20000 });
-    await sleep(rand(5000, 8000));
+    if (stopRequested) return [];
+    await sleepBreakable(rand(5000, 8000));
     await humanWander(page);
-    await sleep(rand(1500, 2500));
+    await sleepBreakable(rand(1500, 2500));
   } catch (_) {
     console.log('  [1/5] Homepage failed, going to search directly');
   }
@@ -311,13 +325,32 @@ async function infiniteScrollSearch(page, keyword, scrollMode = 'semi') {
   if (state === 'login') throw new Error('登录过期，请重新连接');
 
   // Wait for content to settle
-  await sleep(rand(5000, 8000));
+  await sleepBreakable(rand(5000, 8000));
+
+  // ── Diagnostic: dump page content to see if extraction can work ──
+  try {
+    const diag = await page.evaluate(() => {
+      const bt = (document.body && document.body.innerText) || '';
+      return {
+        bodyLen: bt.length,
+        hasFans: bt.includes('万粉丝') || bt.includes('粉丝'),
+        hasEnterShop: bt.includes('进入店铺'),
+        linkCount: document.querySelectorAll('a').length,
+        enterShopLinks: document.querySelectorAll('a[href*="shop"]').length,
+        sample: bt.substring(0, 400),
+      };
+    });
+    console.log(`  [Diag] len=${diag.bodyLen} fans=${diag.hasFans} enterShop=${diag.hasEnterShop} links=${diag.linkCount} shopLinks=${diag.enterShopLinks}`);
+    console.log(`  [Diag] text: ${diag.sample.replace(/\n/g, '¶')}`);
+  } catch (_) {}
 
   console.log(`  [3/5] Infinite scroll (${scrollMode}) — loading all shops...`);
   const allShops = new Map();
   let noChangeRounds = 0;
   let totalScrolls = 0;
   const maxScrolls = 50;
+  let lastScrollHeight = 0;
+  let bouncedAlready = false;
 
   while (totalScrolls < maxScrolls) {
     // ⚡ Check stop request EVERY iteration
@@ -339,10 +372,23 @@ async function infiniteScrollSearch(page, keyword, scrollMode = 'semi') {
     }
     if (state === 'login') throw new Error('登录过期，请重新连接');
 
+    // Get scrollHeight BEFORE scrolling
+    try { lastScrollHeight = await page.evaluate(() => (document.body && document.body.scrollHeight) || 0); } catch (_) {}
+
     // Extract what's currently visible
     let currentShops;
     try {
       currentShops = await extractCurrentShops(page);
+      // Diagnostic: check what raw extraction found
+      if (totalScrolls === 1) {
+        const raw = await page.evaluate(() => {
+          const bt = (document.body && document.body.innerText) || '';
+          const fans = [...bt.matchAll(/(\d+(?:\.\d+)?)万粉丝/g)].length;
+          const links = [...document.querySelectorAll('a')].filter(a => (a.textContent||'').includes('进入店铺')).length;
+          return { fanEntries: fans, shopLinks: links };
+        });
+        console.log(`    [Extract] raw fan entries=${raw.fanEntries} shop links=${raw.shopLinks}`);
+      }
     } catch (e) {
       if (e.message && e.message.includes('Target closed')) {
         throw new Error('浏览器窗口已关闭，请重新「连接淘宝」并开始搜索');
@@ -358,29 +404,14 @@ async function infiniteScrollSearch(page, keyword, scrollMode = 'semi') {
       else { const existing = allShops.get(s.shopId); if (s.followers > existing.followers) allShops.set(s.shopId, s); }
     }
 
-    console.log(`    [Scroll #${totalScrolls}] ${allShops.size} unique shops (+${newCount} new) ${scrollMode === 'auto' ? '[auto]' : '[semi]'}`);
-
-    if (newCount === 0) {
-      noChangeRounds++;
-      const threshold = scrollMode === 'auto' ? 4 : 3;
-      if (noChangeRounds >= threshold) {
-        console.log(`    [Done] ${threshold} rounds with 0 new shops — end of results`);
-        break;
-      }
-    } else {
-      noChangeRounds = 0;
-    }
-
     // ── Scroll action ──
     try {
       if (scrollMode === 'auto') {
-        // Smooth scrollBy in small increments — one call = ~5-12s of visible creeping
         await autoScroll(page);
         await sleep(rand(1500, 3000));
         await humanWander(page);
         await sleep(rand(800, 1500));
       } else {
-        // Semi: scrollTo bottom (need manual scroll to trigger)
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
         await sleep(rand(2500, 4500));
         await humanWander(page);
@@ -393,37 +424,73 @@ async function infiniteScrollSearch(page, keyword, scrollMode = 'semi') {
       }
       console.log(`    [Scroll #${totalScrolls}] scroll failed: ${e.message}. Continuing...`);
     }
-  }
 
-  console.log(`  [4/5] Final scroll — bounce to top then bottom to trigger any remaining lazy-load`);
-  // Bounce: scroll to top, wait, then scroll all the way down again
-  try {
-    await page.evaluate(() => window.scrollTo(0, 0));
-    await sleep(rand(2000, 3000));
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await sleep(rand(3000, 5000));
+    // Get scrollHeight AFTER scrolling
+    let currScrollH = 0;
+    try { currScrollH = await page.evaluate(() => (document.body && document.body.scrollHeight) || 0); } catch (_) {}
+    const scrollGrew = currScrollH > lastScrollHeight + 50;
 
-    // Check CAPTCHA one more time
-    state = await checkPageState(page);
-    if (state === 'captcha') {
-      console.log(`\n  🔴🔴🔴 CAPTCHA DETECTED during final scan for "${keyword}" 🔴🔴🔴`);
-      throw { captcha: true, message: `搜索"${keyword}"时触发人机验证（最终阶段），请在浏览器窗口中手动完成验证后点继续` };
+    console.log(`    [Scroll #${totalScrolls}] ${allShops.size} shops (+${newCount} new) sh=${lastScrollHeight}→${currScrollH}${scrollGrew ? ' ↑' : ''} ${scrollMode === 'auto' ? '[auto]' : '[semi]'}`);
+
+    // Debug: log price samples on first scroll
+    if (totalScrolls === 1 && currentShops.length > 0) {
+      const withPrices = currentShops.filter(s => s.avgPrice > 0 && s.priceCount > 0);
+      const sample = currentShops.slice(0, 4).map(s => `${s.shopName || '?'}(¥${s.avgPrice}/${s.priceCount}p)`).join(' · ');
+      console.log(`    [Price] ${currentShops.length} shops: ${withPrices.length} w/ prices. Sample: ${sample}`);
     }
 
-    // Final extraction
-    const finalShops = await extractCurrentShops(page);
-    for (const s of finalShops) {
-      if (!s.shopId) continue;
-      if (!allShops.has(s.shopId)) allShops.set(s.shopId, s);
-      else { const e = allShops.get(s.shopId); if (s.followers > e.followers) allShops.set(s.shopId, s); }
+    // ── "No progress" decision: scrollHeight didn't grow AND no new shops ──
+    if (newCount === 0 && !scrollGrew) {
+      noChangeRounds++;
+      const threshold = scrollMode === 'auto' ? 6 : 5;
+      console.log(`    [Stale] ${noChangeRounds}/${threshold} no-change rounds`);
+
+      if (noChangeRounds >= threshold && !bouncedAlready) {
+        // ── Bounce: scroll top then bottom, rescan ──
+        console.log(`    [Bounce] Checking top→bottom for missed content...`);
+        bouncedAlready = true;
+        try {
+          await page.evaluate(() => window.scrollTo(0, 0));
+          await sleep(rand(1500, 2500));
+          await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+          await sleep(rand(2000, 3500));
+          await humanWander(page);
+          await sleep(rand(1000, 1500));
+
+          state = await checkPageState(page);
+          if (state === 'captcha') throw { captcha: true, message: `搜索"${keyword}"时触发人机验证，请手动完成验证后点继续` };
+
+          const bounceShops = await extractCurrentShops(page);
+          let bounceNew = 0;
+          for (const s of bounceShops) {
+            if (!s.shopId) continue;
+            if (!allShops.has(s.shopId)) { allShops.set(s.shopId, s); bounceNew++; }
+            else { const e = allShops.get(s.shopId); if (s.followers > e.followers) allShops.set(s.shopId, s); }
+          }
+          console.log(`    [Bounce result] ${bounceNew} new shops, ${allShops.size} total`);
+
+          if (bounceNew > 0) {
+            noChangeRounds = 0; // ← Reset! New content found, keep scrolling
+            continue;
+          }
+        } catch (e2) {
+          if (e2.captcha) throw e2;
+          console.log(`    [Bounce] Failed — ending with ${allShops.size} shops`);
+        }
+        console.log(`    [Done] Bounce found nothing new — ${allShops.size} shops`);
+        break;
+      }
+    } else {
+      if (newCount > 0) noChangeRounds = 0;
+      // Page grew but no new shops — reduce penalty
+      else if (scrollGrew && noChangeRounds > 0) {
+        noChangeRounds = Math.max(0, noChangeRounds - 1);
+        console.log(`    [Loading] Page grew — deadline reduced to ${noChangeRounds}`);
+      }
     }
-    console.log(`    [Final bounce] ${allShops.size} total unique shops`);
-  } catch (e) {
-    if (e.captcha) throw e;
-    console.log(`    [Final bounce] Skipped — ${allShops.size} shops collected`);
   }
 
-  console.log(`  [5/5] Done — ${allShops.size} shops for "${keyword}"`);
+  console.log(`  [4/5] Done — ${allShops.size} shops for "${keyword}"`);
 
   // Sort by followers descending
   return [...allShops.values()].sort((a, b) => b.followers - a.followers);
@@ -432,9 +499,9 @@ async function infiniteScrollSearch(page, keyword, scrollMode = 'semi') {
 // ── Resumable Multi-Keyword Search ─────────────────────────
 let searchState = null; // { keywords, currentIndex, allShops, seenIds, minFollowers }
 
-async function searchKeywords(keywords, minFollowers, resumeFrom = 0, scrollMode = 'semi') {
+async function searchKeywords(keywords, minFollowers, resumeFrom = 0, scrollMode = 'semi', minAvgPrice = 0) {
   if (!searchState || resumeFrom === 0) {
-    searchState = { keywords: keywords.slice(0, 10), currentIndex: 0, allShops: [], seenIds: new Set(), minFollowers, scrollMode };
+    searchState = { keywords: keywords.slice(0, 10), currentIndex: 0, allShops: [], seenIds: new Set(), minFollowers, scrollMode, minAvgPrice };
     clearProgress();
     resetStop();
   } else {
@@ -442,6 +509,7 @@ async function searchKeywords(keywords, minFollowers, resumeFrom = 0, scrollMode
   }
 
   const { allShops, seenIds } = searchState;
+  const priceThreshold = searchState.minAvgPrice || 0;
   const kws = searchState.keywords;
   console.log(`[SearchAll] ${kws.length} keywords (mode: ${scrollMode}) (resuming from #${searchState.currentIndex + 1}): ${kws.join(', ')}`);
 
@@ -468,8 +536,17 @@ async function searchKeywords(keywords, minFollowers, resumeFrom = 0, scrollMode
       throw e;
     }
 
+    let filtered = 0;
+    let noPrice = 0;
     for (const s of shops) {
       if (!s.shopId) continue;
+      // ⌛ Filter: exclude shops with avg price below user-selected threshold
+      //   (priceThreshold === 0 means no filter; avgPrice === 0 means no prices found — let through)
+      if (s.avgPrice > 0 && s.avgPrice < priceThreshold) {
+        filtered++;
+        continue;
+      }
+      if (s.avgPrice === 0) noPrice++;
       if (seenIds.has(s.shopId)) {
         const existing = allShops.find(x => x.shopId === s.shopId);
         if (existing && s.followers > existing.followers) allShops[allShops.indexOf(existing)] = s;
@@ -478,7 +555,9 @@ async function searchKeywords(keywords, minFollowers, resumeFrom = 0, scrollMode
       seenIds.add(s.shopId);
       allShops.push(s);
     }
-    console.log(`    ${shops.length} shops from "${kw}", ${allShops.length} total unique`);
+    const priceLabel = priceThreshold > 0 ? `filtered <¥${priceThreshold}` : 'no price filter';
+    const avgTag = filtered > 0 ? ` (${filtered} ${priceLabel}, ${noPrice} no-price)` : ` (${noPrice} shops without prices)`;
+    console.log(`    ${shops.length} shops from "${kw}", ${allShops.length} total unique${avgTag}`);
 
     // ── Real-time save ──
     const classified = classifyResults(allShops, minFollowers);
@@ -489,9 +568,9 @@ async function searchKeywords(keywords, minFollowers, resumeFrom = 0, scrollMode
     if (i < kws.length - 1 && !stopRequested) {
       const pause = rand(15000, 30000);
       console.log(`    [Pause] ${Math.round(pause / 1000)}s before next keyword...`);
-      await humanWander(loginPage); await sleep(rand(3000, 5000));
-      await humanWander(loginPage); await sleep(rand(3000, 5000));
-      await humanWander(loginPage); await sleep(pause - 10000);
+      await humanWander(loginPage); await sleepBreakable(rand(3000, 5000));
+      await humanWander(loginPage); await sleepBreakable(rand(3000, 5000));
+      await humanWander(loginPage); await sleepBreakable(pause - 10000);
     }
   }
 
@@ -534,6 +613,7 @@ function classifyResults(shops, minFollowers) {
       shopId: s.shopId,
       categories,
       categoryLabel: categories.length > 0 ? categories.join(' · ') : '综合',
+      avgPrice: s.avgPrice || 0,
     });
   }
   return final;
@@ -569,7 +649,7 @@ function clearProgress() {
 }
 
 // ── Core Search ─────────────────────────────────────────────
-async function search(keyword, minFollowers, scrollMode = 'semi') {
+async function search(keyword, minFollowers, scrollMode = 'semi', minAvgPrice = 0) {
   if (!browserContext || !loginPage) throw new Error('请先点击「连接淘宝」登录后再搜索');
   resetStop();
 
@@ -589,10 +669,10 @@ async function search(keyword, minFollowers, scrollMode = 'semi') {
   return result;
 }
 
-async function searchAll(keywords, minFollowers, scrollMode = 'semi') {
+async function searchAll(keywords, minFollowers, scrollMode = 'semi', minAvgPrice = 0) {
   if (!browserContext || !loginPage) throw new Error('请先点击「连接淘宝」登录后再搜索');
   resetStop();
-  return await searchKeywords(keywords, minFollowers, 0, scrollMode);
+  return await searchKeywords(keywords, minFollowers, 0, scrollMode, minAvgPrice);
 }
 
 // ── Export ──────────────────────────────────────────────────
@@ -609,6 +689,7 @@ function filterAndClassify(shops, minFollowers, prefix = '') {
       shopId: s.shopId,
       categories,
       categoryLabel: categories.length > 0 ? categories.join(' · ') : '综合',
+      avgPrice: s.avgPrice || 0,
     });
   }
   const seen = new Set();
