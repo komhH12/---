@@ -37,9 +37,6 @@ export default function App() {
   const [page, setPage] = useState(1);
   const PAGE = 30;
 
-  // Scroll mode: 'semi' = scrollTo (needs manual trigger), 'auto' = mouse.wheel events
-  const [scrollMode, setScrollMode] = useState('semi');
-
   // Stop button
   const [stopBusy, setStopBusy] = useState(false);
 
@@ -130,7 +127,7 @@ export default function App() {
         const s = await getStatus();
         setLoggedIn(s.loggedIn);
         if (!s.loggedIn) { setErr('请先登录 — 点击导航栏的「连接淘宝」'); setLoading(false); return; }
-        const d = await searchMulti(cat.kw.slice(0, 10), minFans, scrollMode, minAvgPrice);
+        const d = await searchMulti(cat.kw.slice(0, 10), minFans, minAvgPrice);
         if (d.captcha) { handleCaptcha({ message: d.error, keyword: d.keyword, progress: d.progress, shopsSoFar: d.shopsSoFar }); return; }
         if (d.browserClosed) {
           setErr(d.error);
@@ -160,8 +157,8 @@ export default function App() {
     setSearchedKw(finalKw);
     try {
       let d;
-      if (searchKws.length > 1) d = await searchMulti(searchKws, minFans, scrollMode, minAvgPrice);
-      else d = await search(finalKw, minFans, scrollMode, minAvgPrice);
+      if (searchKws.length > 1) d = await searchMulti(searchKws, minFans, minAvgPrice);
+      else d = await search(finalKw, minFans, minAvgPrice);
       if (d.captcha) { handleCaptcha({ message: d.error, keyword: d.keyword, progress: d.progress, shopsSoFar: d.shopsSoFar }); return; }
       if (d.browserClosed) {
         setErr(d.error);
@@ -304,18 +301,6 @@ export default function App() {
                 <option value="200">¥200 以上</option>
                 <option value="500">¥500 以上</option>
                 <option value="1000">¥1000 以上</option>
-              </select>
-            </div>
-
-            <div className="w-[140px]">
-              <label className="block text-[11px] font-bold text-[var(--color-ink-muted)] uppercase tracking-[0.1em] mb-2">滚动方式</label>
-              <select value={scrollMode} onChange={e => setScrollMode(e.target.value)}
-                className="w-full h-12 px-4 bg-[var(--color-page)] border border-[var(--color-line)] rounded-xl text-sm
-                  focus:outline-none focus:ring-2 focus:ring-[var(--color-brand)]/20 focus:border-[var(--color-brand)]
-                  appearance-none cursor-pointer"
-                style={{backgroundImage:`url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7280' stroke-width='1.5'/%3E%3C/svg%3E")`,backgroundRepeat:'no-repeat',backgroundPosition:'right 12px center'}}>
-                <option value="semi">半人工 (反爬最低)</option>
-                <option value="auto">全自动 (无需操作)</option>
               </select>
             </div>
 

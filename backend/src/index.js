@@ -25,19 +25,18 @@ app.post('/api/login', async (_req, res) => {
 });
 
 app.post('/api/search', async (req, res) => {
-  const { keyword, keywords, minFollowers, scrollMode, minAvgPrice } = req.body;
+  const { keyword, keywords, minFollowers, minAvgPrice } = req.body;
   const min = parseInt(minFollowers) || 300000;
-  const mode = scrollMode || 'semi';
   const priceMin = parseInt(minAvgPrice) || 0;
 
   try {
     let results;
     if (keywords && Array.isArray(keywords) && keywords.length > 0) {
-      console.log(`[Search] Multi-keyword: ${keywords.length} words, min: ${min}, mode: ${mode}, price>=${priceMin}`);
-      results = await searchAll(keywords, min, mode, priceMin);
+      console.log(`[Search] Multi-keyword: ${keywords.length} words, min: ${min}, price>=${priceMin}`);
+      results = await searchAll(keywords, min, priceMin);
     } else if (keyword) {
-      console.log(`[Search] "${keyword}", min: ${min}, mode: ${mode}, price>=${priceMin}`);
-      results = await search(keyword, min, mode, priceMin);
+      console.log(`[Search] "${keyword}", min: ${min}, price>=${priceMin}`);
+      results = await search(keyword, min, priceMin);
     } else {
       return res.status(400).json({ error: '请提供搜索关键词' });
     }

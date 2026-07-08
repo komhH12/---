@@ -172,11 +172,11 @@ async function autoScroll(page) {
     // 2. scrollBy small increments (4-7px) × 50-70 steps = 200-490px total
     //   with stopRequested check every ~10 steps
     const steps = Math.floor(rand(50, 71));
-    const dy = Math.floor(rand(4, 8));
+    const dy = Math.floor(rand(6, 12));
     for (let i = 0; i < steps; i++) {
       if (stopRequested) break;
       await page.evaluate((y) => window.scrollBy(0, y), dy);
-      await sleep(rand(100, 180));
+      await sleep(rand(60, 120));
       if (i > 0 && i % 10 === 0 && stopRequested) break;
     }
 
@@ -247,10 +247,10 @@ function extractCurrentShops(page) {
       .filter(a => (a.textContent || '').includes('进入店铺'))
       .map(a => {
         const m = (a.href || '').match(/shop(\d+)/);
-        return m ? m[1] : null;
-      }).filter(id => id);
+        return m ? { id: m[1], el: a } : null;
+      }).filter(item => item);
 
-    // Step 3: Simple 1:1 zip — each fan entry paired with a shop link
+    // Step 3: For each shop link, extract prices from its card container via DOM
     const count = Math.min(allFans.length, shopLinks.length);
     for (let i = 0; i < count; i++) {
       const fm = allFans[i];
@@ -272,20 +272,49 @@ function extractCurrentShops(page) {
       const after = bodyText.substring(pos, Math.min(bodyText.length, pos + 800));
       const productLines = after.split('\n').filter(l => l.trim().length > 1).slice(0, 10);
 
-      // Extract prices
-      const ctx = before + ' ' + after;
-      const priceMatches = ctx.match(/[¥￥]\s*(\d+(?:\.\d{1,2})?)/g);
-      const prices = [];
-      if (priceMatches) for (const p of priceMatches) {
-        const n = parseFloat(p.replace(/[¥￥\s]/g, ''));
-        if (n > 0 && n < 200000) prices.push(n);
-        if (prices.length >= 7) break;
+      // ── DOM-based price extraction per shop card ──
+      const shopEl = shopLinks[i].el;
+      let card = shopEl;
+      for (let j = 0; j < 15 && card && card !== document.body; j++) {
+        if ((card.textContent || '').length > 200) break;
+        card = card.parentElement;
       }
+      const container = card || document.body;
+
+      // Extract prices: ¥ and number appear on SEPARATE innerText lines
+      // e.g. line N = "上衣 ¥", line N+1 = "123"
+      const prices = [];
+      const text = (container && container.innerText) ? container.innerText : '';
+      const textLines = text.split('\n');
+      
+      // Pass 1: look for lines with ¥/￥ that span two lines
+      for (let li = 0; li < textLines.length - 1; li++) {
+        const curr = textLines[li].trim();
+        const next = textLines[li + 1].trim();
+        // Current line contains ¥/￥, next line is a pure number
+        if (/[¥￥]$/.test(curr) && /^\d+(?:\.\d{1,2})?$/.test(next)) {
+          const n = parseFloat(next);
+          if (n > 0 && n < 200000) {
+            prices.push(n);
+            if (prices.length >= 7) break;
+          }
+        }
+      }
+      
+      // Pass 2: if nothing found, try single-line ¥123 format
+      if (prices.length === 0) {
+        const priceMatches = text.match(/[¥￥]\s*(\d+(?:\.\d{1,2})?)/g);
+        if (priceMatches) for (const p of priceMatches) {
+          const n = parseFloat(p.replace(/[¥￥\s]/g, ''));
+          if (n > 0 && n < 200000) { prices.push(n); if (prices.length >= 7) break; }
+        }
+      }
+
       const avgPrice = prices.length > 0 ? Math.round(prices.reduce((a,b)=>a+b,0) / prices.length) : 0;
 
       results.push({
-        shopId: shopLinks[i],
-        shopName: name || ('店铺' + shopLinks[i]),
+        shopId: shopLinks[i].id,
+        shopName: name || ('店铺' + shopLinks[i].id),
         followers,
         productContext: productLines.join(' '),
         avgPrice,
@@ -300,7 +329,7 @@ function extractCurrentShops(page) {
  * Full infinite-scroll search for one keyword.
  * @param {string} scrollMode - 'semi' (scrollTo bottom, needs manual scroll trigger) or 'auto' (mouse.wheel events)
  */
-async function infiniteScrollSearch(page, keyword, scrollMode = 'semi') {
+async function infiniteScrollSearch(page, keyword) {
   console.log(`  [1/5] Visiting taobao homepage`);
   try {
     await page.goto('https://www.taobao.com/', { waitUntil: 'domcontentloaded', timeout: 20000 });
@@ -312,7 +341,7 @@ async function infiniteScrollSearch(page, keyword, scrollMode = 'semi') {
     console.log('  [1/5] Homepage failed, going to search directly');
   }
 
-  console.log(`  [2/5] Search: ${keyword} (mode: ${scrollMode})`);
+  console.log(`  [2/5] Search: ${keyword}`);
   const url = `https://s.taobao.com/search?q=${encodeURIComponent(keyword)}&tab=shop`;
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
@@ -344,15 +373,15 @@ async function infiniteScrollSearch(page, keyword, scrollMode = 'semi') {
     console.log(`  [Diag] text: ${diag.sample.replace(/\n/g, '¶')}`);
   } catch (_) {}
 
-  console.log(`  [3/5] Infinite scroll (${scrollMode}) — loading all shops...`);
+  console.log('  [3/5] Infinite scroll — loading all shops...');
   const allShops = new Map();
   let noChangeRounds = 0;
   let totalScrolls = 0;
-  const maxScrolls = 50;
   let lastScrollHeight = 0;
-  let bouncedAlready = false;
+  let bounceCount = 0;
+  const maxBounces = 3;
 
-  while (totalScrolls < maxScrolls) {
+  while (true) {
     // ⚡ Check stop request EVERY iteration
     if (stopRequested) {
       console.log(`\n  🛑 Stop requested — returning ${allShops.size} shops collected so far`);
@@ -406,17 +435,10 @@ async function infiniteScrollSearch(page, keyword, scrollMode = 'semi') {
 
     // ── Scroll action ──
     try {
-      if (scrollMode === 'auto') {
-        await autoScroll(page);
-        await sleep(rand(1500, 3000));
-        await humanWander(page);
-        await sleep(rand(800, 1500));
-      } else {
-        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-        await sleep(rand(2500, 4500));
-        await humanWander(page);
-        await sleep(rand(1000, 2000));
-      }
+      await autoScroll(page);
+      await sleep(rand(1000, 2000));
+      await humanWander(page);
+      await sleep(rand(530, 1000));
     } catch (e) {
       if (!(await isBrowserAlive())) {
         console.log(`\n  💀 Browser closed during scroll/wait #${totalScrolls}`);
@@ -430,25 +452,25 @@ async function infiniteScrollSearch(page, keyword, scrollMode = 'semi') {
     try { currScrollH = await page.evaluate(() => (document.body && document.body.scrollHeight) || 0); } catch (_) {}
     const scrollGrew = currScrollH > lastScrollHeight + 50;
 
-    console.log(`    [Scroll #${totalScrolls}] ${allShops.size} shops (+${newCount} new) sh=${lastScrollHeight}→${currScrollH}${scrollGrew ? ' ↑' : ''} ${scrollMode === 'auto' ? '[auto]' : '[semi]'}`);
+    console.log(`    [Scroll #${totalScrolls}] ${allShops.size} shops (+${newCount} new) sh=${lastScrollHeight}→${currScrollH}${scrollGrew ? ' ↑' : ''}`);
 
     // Debug: log price samples on first scroll
     if (totalScrolls === 1 && currentShops.length > 0) {
       const withPrices = currentShops.filter(s => s.avgPrice > 0 && s.priceCount > 0);
-      const sample = currentShops.slice(0, 4).map(s => `${s.shopName || '?'}(¥${s.avgPrice}/${s.priceCount}p)`).join(' · ');
-      console.log(`    [Price] ${currentShops.length} shops: ${withPrices.length} w/ prices. Sample: ${sample}`);
+      const sample = currentShops.slice(0, 4).map(s => `${s.shopName || '?'}(¥${s.avgPrice}=avg of ${s.priceCount}p)`).join(' · ');
+      console.log(`    [Price] ${currentShops.length} shops (${withPrices.length} w/ prices). Sample: ${sample}`);
     }
 
     // ── "No progress" decision: scrollHeight didn't grow AND no new shops ──
     if (newCount === 0 && !scrollGrew) {
       noChangeRounds++;
-      const threshold = scrollMode === 'auto' ? 6 : 5;
+      const threshold = 6;
       console.log(`    [Stale] ${noChangeRounds}/${threshold} no-change rounds`);
 
-      if (noChangeRounds >= threshold && !bouncedAlready) {
+      if (noChangeRounds >= threshold && bounceCount < maxBounces) {
         // ── Bounce: scroll top then bottom, rescan ──
-        console.log(`    [Bounce] Checking top→bottom for missed content...`);
-        bouncedAlready = true;
+        console.log(`    [Bounce #${bounceCount + 1}/${maxBounces}] Checking top→bottom for missed content...`);
+        bounceCount++;
         try {
           await page.evaluate(() => window.scrollTo(0, 0));
           await sleep(rand(1500, 2500));
@@ -467,27 +489,30 @@ async function infiniteScrollSearch(page, keyword, scrollMode = 'semi') {
             if (!allShops.has(s.shopId)) { allShops.set(s.shopId, s); bounceNew++; }
             else { const e = allShops.get(s.shopId); if (s.followers > e.followers) allShops.set(s.shopId, s); }
           }
-          console.log(`    [Bounce result] ${bounceNew} new shops, ${allShops.size} total`);
+          console.log(`    [Bounce #${bounceCount} result] ${bounceNew} new shops, ${allShops.size} total`);
 
           if (bounceNew > 0) {
-            noChangeRounds = 0; // ← Reset! New content found, keep scrolling
+            // New content found! Reset all counters, keep scrolling
+            noChangeRounds = 0;
+            bounceCount = 0;
             continue;
           }
         } catch (e2) {
           if (e2.captcha) throw e2;
-          console.log(`    [Bounce] Failed — ending with ${allShops.size} shops`);
+          console.log(`    [Bounce #${bounceCount}] Failed — ending with ${allShops.size} shops`);
         }
-        console.log(`    [Done] Bounce found nothing new — ${allShops.size} shops`);
-        break;
+        // After bounce with no new shops → if max bounces reached, truly done
+        if (bounceCount >= maxBounces) {
+          console.log(`    [Done] ${maxBounces} bounces found nothing — ${allShops.size} shops`);
+          break;
+        }
       }
-    } else {
-      if (newCount > 0) noChangeRounds = 0;
-      // Page grew but no new shops — reduce penalty
-      else if (scrollGrew && noChangeRounds > 0) {
-        noChangeRounds = Math.max(0, noChangeRounds - 1);
-        console.log(`    [Loading] Page grew — deadline reduced to ${noChangeRounds}`);
-      }
+    } else if (newCount > 0) {
+      noChangeRounds = 0;
+      bounceCount = 0; // new shops found → reset bounce limit too
     }
+    // scrollGrew alone without new shops: do NOT reduce penalty
+    // This was the bug — [Loading] was trapping the loop by decrementing the counter
   }
 
   console.log(`  [4/5] Done — ${allShops.size} shops for "${keyword}"`);
@@ -499,9 +524,9 @@ async function infiniteScrollSearch(page, keyword, scrollMode = 'semi') {
 // ── Resumable Multi-Keyword Search ─────────────────────────
 let searchState = null; // { keywords, currentIndex, allShops, seenIds, minFollowers }
 
-async function searchKeywords(keywords, minFollowers, resumeFrom = 0, scrollMode = 'semi', minAvgPrice = 0) {
+async function searchKeywords(keywords, minFollowers, resumeFrom = 0, minAvgPrice = 0) {
   if (!searchState || resumeFrom === 0) {
-    searchState = { keywords: keywords.slice(0, 10), currentIndex: 0, allShops: [], seenIds: new Set(), minFollowers, scrollMode, minAvgPrice };
+    searchState = { keywords: keywords.slice(0, 10), currentIndex: 0, allShops: [], seenIds: new Set(), minFollowers, minAvgPrice };
     clearProgress();
     resetStop();
   } else {
@@ -511,7 +536,7 @@ async function searchKeywords(keywords, minFollowers, resumeFrom = 0, scrollMode
   const { allShops, seenIds } = searchState;
   const priceThreshold = searchState.minAvgPrice || 0;
   const kws = searchState.keywords;
-  console.log(`[SearchAll] ${kws.length} keywords (mode: ${scrollMode}) (resuming from #${searchState.currentIndex + 1}): ${kws.join(', ')}`);
+  console.log(`[SearchAll] ${kws.length} keywords (resuming from #${searchState.currentIndex + 1}): ${kws.join(', ')}`);
 
   for (let i = searchState.currentIndex; i < kws.length; i++) {
     // ⚡ Check stop before each keyword
@@ -525,7 +550,7 @@ async function searchKeywords(keywords, minFollowers, resumeFrom = 0, scrollMode
 
     let shops;
     try {
-      shops = await infiniteScrollSearch(loginPage, kw, scrollMode);
+      shops = await infiniteScrollSearch(loginPage, kw);
     } catch (e) {
       if (e.captcha) {
         searchState.currentIndex = i;
@@ -649,13 +674,13 @@ function clearProgress() {
 }
 
 // ── Core Search ─────────────────────────────────────────────
-async function search(keyword, minFollowers, scrollMode = 'semi', minAvgPrice = 0) {
+async function search(keyword, minFollowers, minAvgPrice = 0) {
   if (!browserContext || !loginPage) throw new Error('请先点击「连接淘宝」登录后再搜索');
   resetStop();
 
   let shops;
   try {
-    shops = await infiniteScrollSearch(loginPage, keyword, scrollMode);
+    shops = await infiniteScrollSearch(loginPage, keyword);
   } catch (e) {
     if (e.captcha) throw e;
     throw e;
@@ -669,10 +694,10 @@ async function search(keyword, minFollowers, scrollMode = 'semi', minAvgPrice = 
   return result;
 }
 
-async function searchAll(keywords, minFollowers, scrollMode = 'semi', minAvgPrice = 0) {
+async function searchAll(keywords, minFollowers, minAvgPrice = 0) {
   if (!browserContext || !loginPage) throw new Error('请先点击「连接淘宝」登录后再搜索');
   resetStop();
-  return await searchKeywords(keywords, minFollowers, 0, scrollMode, minAvgPrice);
+  return await searchKeywords(keywords, minFollowers, 0, minAvgPrice);
 }
 
 // ── Export ──────────────────────────────────────────────────
