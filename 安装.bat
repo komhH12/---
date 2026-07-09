@@ -22,7 +22,7 @@ if errorlevel 1 (
 
 echo [1/4] Node.js 已就绪
 node -v
-npm -v
+call npm -v
 echo.
 
 echo [2/4] 安装后端依赖（首次可能较慢）...
