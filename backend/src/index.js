@@ -1,14 +1,20 @@
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
+const fs = require('fs');
 const { openForLogin, checkLoggedIn, search, searchAll, resumeSearch, getProgress, clearProgress, requestStop } = require('./scraper');
 
-console.log(`[Startup] Infinite scroll + CAPTCHA detection + Resume`);
+console.log(`[Startup] v9.0 — Robust price + auto/manual scroll`);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cors());
 app.use(express.json());
+
+const PUBLIC_DIR = path.join(__dirname, '..', 'public');
+const DIST_DIR = path.join(__dirname, '..', '..', 'frontend', 'dist');
+const staticDir = fs.existsSync(PUBLIC_DIR) ? PUBLIC_DIR : (fs.existsSync(DIST_DIR) ? DIST_DIR : null);
 
 app.get('/api/status', async (_req, res) => {
   try { res.json(await checkLoggedIn()); }
@@ -25,18 +31,19 @@ app.post('/api/login', async (_req, res) => {
 });
 
 app.post('/api/search', async (req, res) => {
-  const { keyword, keywords, minFollowers, minAvgPrice } = req.body;
+  const { keyword, keywords, minFollowers, minAvgPrice, scrollMode } = req.body;
   const min = parseInt(minFollowers) || 300000;
   const priceMin = parseInt(minAvgPrice) || 0;
+  const mode = scrollMode === 'manual' ? 'manual' : 'auto';
 
   try {
     let results;
     if (keywords && Array.isArray(keywords) && keywords.length > 0) {
-      console.log(`[Search] Multi-keyword: ${keywords.length} words, min: ${min}, price>=${priceMin}`);
-      results = await searchAll(keywords, min, priceMin);
+      console.log(`[Search] Multi-keyword: ${keywords.length} words, min: ${min}, price>=${priceMin}, mode=${mode}`);
+      results = await searchAll(keywords, min, priceMin, mode);
     } else if (keyword) {
-      console.log(`[Search] "${keyword}", min: ${min}, price>=${priceMin}`);
-      results = await search(keyword, min, priceMin);
+      console.log(`[Search] "${keyword}", min: ${min}, price>=${priceMin}, mode=${mode}`);
+      results = await search(keyword, min, priceMin, mode);
     } else {
       return res.status(400).json({ error: '请提供搜索关键词' });
     }
@@ -138,4 +145,16 @@ app.post('/api/search/stop', (_req, res) => {
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
 
-app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
+if (staticDir) {
+  app.use(express.static(staticDir));
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api')) return next();
+    res.sendFile(path.join(staticDir, 'index.html'));
+  });
+  console.log(`[Static] Serving UI from ${staticDir}`);
+}
+
+app.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`);
+  if (staticDir) console.log(`打开浏览器访问: http://localhost:${PORT}`);
+});

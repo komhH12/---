@@ -232,89 +232,176 @@ async function checkPageState(page) {
 // ── Infinite Scroll Extraction ─────────────────────────────
 /**
  * Extract all shops currently rendered on the page.
- * Returns deduped array of { shopId, shopName, followers, productContext }.
+ * Returns deduped array of { shopId, shopName, followers, productContext, avgPrice }.
  */
 function extractCurrentShops(page) {
   return safeEval(page, () => {
-    const bodyText = (document.body && document.body.innerText) || '';
+    function robustAvg(prices) {
+      if (!prices || prices.length === 0) return 0;
+      const uniq = [...new Set(prices.map(p => Math.round(p * 100) / 100))];
+      if (uniq.length === 1) return Math.round(uniq[0]);
+      const sorted = uniq.slice().sort((a, b) => a - b);
+      // Drop extremes when enough samples (likely 划线原价 / 异常值)
+      let pool = sorted;
+      if (sorted.length >= 5) pool = sorted.slice(1, -1);
+      else if (sorted.length >= 4) {
+        const med = sorted[Math.floor(sorted.length / 2)];
+        pool = sorted.filter(p => p >= med * 0.35 && p <= med * 2.8);
+        if (pool.length < 2) pool = sorted;
+      }
+      const mid = Math.floor(pool.length / 2);
+      const median = pool.length % 2 ? pool[mid] : (pool[mid - 1] + pool[mid]) / 2;
+      // Prefer median; blend slightly with trimmed mean for stability
+      const mean = pool.reduce((a, b) => a + b, 0) / pool.length;
+      return Math.round(median * 0.7 + mean * 0.3);
+    }
+
+    function findCard(shopEl) {
+      let best = null;
+      let el = shopEl;
+      for (let j = 0; j < 18 && el && el !== document.body; j++) {
+        const t = el.innerText || '';
+        const hasFans = /\d+(?:\.\d+)?万粉丝/.test(t) || /\d+\s*粉丝/.test(t);
+        const yenCount = (t.match(/[¥￥]/g) || []).length;
+        if (hasFans && yenCount >= 1 && t.length > 80 && t.length < 8000) {
+          best = el;
+          // Prefer smallest card that still has fans + prices
+          break;
+        }
+        el = el.parentElement;
+      }
+      if (best) return best;
+      // Fallback: first ancestor with enough text
+      el = shopEl;
+      for (let j = 0; j < 12 && el && el !== document.body; j++) {
+        if ((el.textContent || '').length > 200) return el;
+        el = el.parentElement;
+      }
+      return shopEl.parentElement || document.body;
+    }
+
+    function extractPrices(container) {
+      const prices = [];
+      const seen = new Set();
+      const push = (n) => {
+        if (!(n > 0 && n < 100000)) return;
+        const key = Math.round(n * 100);
+        if (seen.has(key)) return;
+        seen.add(key);
+        prices.push(n);
+      };
+
+      // Pass 1: leaf-ish nodes that look like price displays
+      const nodes = container.querySelectorAll('span, em, strong, b, i, div, p');
+      for (const node of nodes) {
+        if (prices.length >= 12) break;
+        if (node.children && node.children.length > 3) continue;
+        const raw = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!raw || raw.length > 40) continue;
+        if (/粉丝|销量|人付款|评价|好评|回头客|进入店铺/.test(raw)) continue;
+
+        // "¥123" / "￥123.45" / "¥ 123"
+        let m = raw.match(/^[¥￥]\s*(\d+(?:\.\d{1,2})?)$/);
+        if (m) { push(parseFloat(m[1])); continue; }
+
+        // "123" next to a sibling/parent that is just ¥
+        if (/^\d+(?:\.\d{1,2})?$/.test(raw)) {
+          const prev = (node.previousElementSibling && (node.previousElementSibling.innerText || '').trim()) || '';
+          const parent = (node.parentElement && (node.parentElement.innerText || '').replace(/\s+/g, ' ').trim()) || '';
+          if (/[¥￥]$/.test(prev) || /^[¥￥]\s*\d/.test(parent) || parent.includes('¥') || parent.includes('￥')) {
+            push(parseFloat(raw));
+          }
+        }
+      }
+
+      // Pass 2: cross-line innerText (¥ on one line, number on next)
+      if (prices.length < 2) {
+        const textLines = ((container.innerText || '')).split('\n');
+        for (let li = 0; li < textLines.length - 1; li++) {
+          const curr = textLines[li].trim();
+          const next = textLines[li + 1].trim();
+          if (/[¥￥]\s*$/.test(curr) && /^\d+(?:\.\d{1,2})?$/.test(next)) {
+            push(parseFloat(next));
+            if (prices.length >= 12) break;
+          }
+          // Same line: "xxx ¥123"
+          const same = curr.match(/[¥￥]\s*(\d+(?:\.\d{1,2})?)/g);
+          if (same) for (const p of same) push(parseFloat(p.replace(/[¥￥\s]/g, '')));
+        }
+      }
+
+      // Pass 3: regex fallback on card text, skip fan-count region
+      if (prices.length === 0) {
+        const text = container.innerText || '';
+        const cut = text.replace(/\d+(?:\.\d+)?万粉丝[\s\S]{0,40}/, ' ');
+        const priceMatches = cut.match(/[¥￥]\s*(\d+(?:\.\d{1,2})?)/g);
+        if (priceMatches) for (const p of priceMatches) {
+          push(parseFloat(p.replace(/[¥￥\s]/g, '')));
+          if (prices.length >= 12) break;
+        }
+      }
+
+      return prices;
+    }
+
     const results = [];
+    const seenIds = new Set();
 
-    // Step 1: Find all "xx万粉丝" entries
-    const allFans = [...bodyText.matchAll(/(\d+(?:\.\d+)?)万粉丝/g)];
-
-    // Step 2: Find all "进入店铺" links with shop IDs
     const shopLinks = [...document.querySelectorAll('a')]
       .filter(a => (a.textContent || '').includes('进入店铺'))
       .map(a => {
         const m = (a.href || '').match(/shop(\d+)/);
         return m ? { id: m[1], el: a } : null;
-      }).filter(item => item);
+      }).filter(Boolean);
 
-    // Step 3: For each shop link, extract prices from its card container via DOM
-    const count = Math.min(allFans.length, shopLinks.length);
-    for (let i = 0; i < count; i++) {
-      const fm = allFans[i];
-      const followers = Math.round(parseFloat(fm[1]) * 10000);
+    for (const link of shopLinks) {
+      if (seenIds.has(link.id)) continue;
+      seenIds.add(link.id);
 
-      // Get shop name from the text before the fan count
-      const pos = fm.index;
-      const before = bodyText.substring(Math.max(0, pos - 200), pos);
-      const lines = before.split('\n').filter(l => l.trim().length > 1);
-      let name = '';
-      for (let k = lines.length - 1; k >= 0; k--) {
-        const line = lines[k].trim();
-        if (/^[\d.]+$/.test(line)) continue;
-        if (line.length < 2) continue;
-        if (/^(进入店铺|综合|销量|价格|好评|回头客|加载|Ctrl\+V|搜同款|所有宝贝|天猫|淘宝|店铺|企业购)/.test(line)) continue;
-        name = line.substring(0, 35);
-        break;
-      }
-      const after = bodyText.substring(pos, Math.min(bodyText.length, pos + 800));
-      const productLines = after.split('\n').filter(l => l.trim().length > 1).slice(0, 10);
-
-      // ── DOM-based price extraction per shop card ──
-      const shopEl = shopLinks[i].el;
-      let card = shopEl;
-      for (let j = 0; j < 15 && card && card !== document.body; j++) {
-        if ((card.textContent || '').length > 200) break;
-        card = card.parentElement;
-      }
-      const container = card || document.body;
-
-      // Extract prices: ¥ and number appear on SEPARATE innerText lines
-      // e.g. line N = "上衣 ¥", line N+1 = "123"
-      const prices = [];
+      const container = findCard(link.el);
       const text = (container && container.innerText) ? container.innerText : '';
-      const textLines = text.split('\n');
-      
-      // Pass 1: look for lines with ¥/￥ that span two lines
-      for (let li = 0; li < textLines.length - 1; li++) {
-        const curr = textLines[li].trim();
-        const next = textLines[li + 1].trim();
-        // Current line contains ¥/￥, next line is a pure number
-        if (/[¥￥]$/.test(curr) && /^\d+(?:\.\d{1,2})?$/.test(next)) {
-          const n = parseFloat(next);
-          if (n > 0 && n < 200000) {
-            prices.push(n);
-            if (prices.length >= 7) break;
-          }
-        }
+
+      let followers = 0;
+      const fanM = text.match(/(\d+(?:\.\d+)?)万粉丝/);
+      if (fanM) followers = Math.round(parseFloat(fanM[1]) * 10000);
+      else {
+        const fanM2 = text.match(/(\d[\d,]*)\s*粉丝/);
+        if (fanM2) followers = parseInt(fanM2[1].replace(/,/g, ''), 10) || 0;
       }
-      
-      // Pass 2: if nothing found, try single-line ¥123 format
-      if (prices.length === 0) {
-        const priceMatches = text.match(/[¥￥]\s*(\d+(?:\.\d{1,2})?)/g);
-        if (priceMatches) for (const p of priceMatches) {
-          const n = parseFloat(p.replace(/[¥￥\s]/g, ''));
-          if (n > 0 && n < 200000) { prices.push(n); if (prices.length >= 7) break; }
+
+      const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 1);
+      let name = '';
+      for (let k = 0; k < lines.length; k++) {
+        const line = lines[k];
+        if (/万粉丝|粉丝/.test(line)) {
+          for (let b = k - 1; b >= Math.max(0, k - 6); b--) {
+            const cand = lines[b];
+            if (/^[\d.¥￥]+$/.test(cand)) continue;
+            if (cand.length < 2 || cand.length > 40) continue;
+            if (/^(进入店铺|综合|销量|价格|好评|回头客|加载|Ctrl\+V|搜同款|所有宝贝|天猫|淘宝|店铺|企业购|包邮)/.test(cand)) continue;
+            name = cand.substring(0, 35);
+            break;
+          }
+          break;
         }
       }
 
-      const avgPrice = prices.length > 0 ? Math.round(prices.reduce((a,b)=>a+b,0) / prices.length) : 0;
+      const productLines = [];
+      let afterFans = false;
+      for (const line of lines) {
+        if (/万粉丝|粉丝/.test(line)) { afterFans = true; continue; }
+        if (!afterFans) continue;
+        if (/进入店铺/.test(line)) break;
+        if (line.length > 1) productLines.push(line);
+        if (productLines.length >= 10) break;
+      }
+
+      const prices = extractPrices(container);
+      const avgPrice = robustAvg(prices);
 
       results.push({
-        shopId: shopLinks[i].id,
-        shopName: name || ('店铺' + shopLinks[i].id),
+        shopId: link.id,
+        shopName: name || ('店铺' + link.id),
         followers,
         productContext: productLines.join(' '),
         avgPrice,
@@ -327,15 +414,16 @@ function extractCurrentShops(page) {
 
 /**
  * Full infinite-scroll search for one keyword.
- * @param {string} scrollMode - 'semi' (scrollTo bottom, needs manual scroll trigger) or 'auto' (mouse.wheel events)
+ * @param {string} scrollMode - 'auto' | 'manual' (user scrolls; we only poll & record)
  */
-async function infiniteScrollSearch(page, keyword) {
-  console.log(`  [1/5] Visiting taobao homepage`);
+async function infiniteScrollSearch(page, keyword, scrollMode = 'auto') {
+  const isManual = scrollMode === 'manual';
+  console.log(`  [1/5] Visiting taobao homepage (mode=${scrollMode})`);
   try {
     await page.goto('https://www.taobao.com/', { waitUntil: 'domcontentloaded', timeout: 20000 });
     if (stopRequested) return [];
     await sleepBreakable(rand(5000, 8000));
-    await humanWander(page);
+    if (!isManual) await humanWander(page);
     await sleepBreakable(rand(1500, 2500));
   } catch (_) {
     console.log('  [1/5] Homepage failed, going to search directly');
@@ -345,7 +433,6 @@ async function infiniteScrollSearch(page, keyword) {
   const url = `https://s.taobao.com/search?q=${encodeURIComponent(keyword)}&tab=shop`;
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-  // Check CAPTCHA immediately after search result loads
   let state = await checkPageState(page);
   if (state === 'captcha') {
     console.log(`\n  🔴 CAPTCHA after search for "${keyword}"`);
@@ -353,10 +440,8 @@ async function infiniteScrollSearch(page, keyword) {
   }
   if (state === 'login') throw new Error('登录过期，请重新连接');
 
-  // Wait for content to settle
   await sleepBreakable(rand(5000, 8000));
 
-  // ── Diagnostic: dump page content to see if extraction can work ──
   try {
     const diag = await page.evaluate(() => {
       const bt = (document.body && document.body.innerText) || '';
@@ -373,23 +458,25 @@ async function infiniteScrollSearch(page, keyword) {
     console.log(`  [Diag] text: ${diag.sample.replace(/\n/g, '¶')}`);
   } catch (_) {}
 
-  console.log('  [3/5] Infinite scroll — loading all shops...');
+  console.log(isManual
+    ? '  [3/5] 全人工模式 — 请在浏览器中手动滚动，程序仅记录店铺；点「终止」结束本词'
+    : '  [3/5] Infinite scroll — loading all shops...');
   const allShops = new Map();
   let noChangeRounds = 0;
   let totalScrolls = 0;
   let lastScrollHeight = 0;
   let bounceCount = 0;
   const maxBounces = 3;
+  let manualIdleRounds = 0;
+  const manualIdleLimit = 90; // ~3 min of no new shops @ 2s poll → soft hint only, still wait for stop
 
   while (true) {
-    // ⚡ Check stop request EVERY iteration
     if (stopRequested) {
       console.log(`\n  🛑 Stop requested — returning ${allShops.size} shops collected so far`);
       break;
     }
     totalScrolls++;
 
-    // ⚡ Check CAPTCHA BEFORE EVERY scroll
     if (!(await isBrowserAlive())) {
       console.log(`\n  💀 Browser closed during scroll #${totalScrolls}`);
       throw new Error('浏览器窗口已关闭，请重新「连接淘宝」并开始搜索');
@@ -401,14 +488,11 @@ async function infiniteScrollSearch(page, keyword) {
     }
     if (state === 'login') throw new Error('登录过期，请重新连接');
 
-    // Get scrollHeight BEFORE scrolling
     try { lastScrollHeight = await page.evaluate(() => (document.body && document.body.scrollHeight) || 0); } catch (_) {}
 
-    // Extract what's currently visible
     let currentShops;
     try {
       currentShops = await extractCurrentShops(page);
-      // Diagnostic: check what raw extraction found
       if (totalScrolls === 1) {
         const raw = await page.evaluate(() => {
           const bt = (document.body && document.body.innerText) || '';
@@ -430,10 +514,38 @@ async function infiniteScrollSearch(page, keyword) {
     for (const s of currentShops) {
       if (!s.shopId) continue;
       if (!allShops.has(s.shopId)) { allShops.set(s.shopId, s); newCount++; }
-      else { const existing = allShops.get(s.shopId); if (s.followers > existing.followers) allShops.set(s.shopId, s); }
+      else {
+        const existing = allShops.get(s.shopId);
+        // Prefer richer price data / higher followers on re-scan
+        if (s.followers > existing.followers || (s.priceCount || 0) > (existing.priceCount || 0)) {
+          allShops.set(s.shopId, s);
+        }
+      }
     }
 
-    // ── Scroll action ──
+    if (isManual) {
+      // User scrolls; we only poll
+      await sleepBreakable(rand(1800, 2500));
+      let currScrollH = 0;
+      try { currScrollH = await page.evaluate(() => (document.body && document.body.scrollHeight) || 0); } catch (_) {}
+      console.log(`    [Manual #${totalScrolls}] ${allShops.size} shops (+${newCount} new) sh=${lastScrollHeight}→${currScrollH}`);
+      if (totalScrolls === 1 && currentShops.length > 0) {
+        const withPrices = currentShops.filter(s => s.avgPrice > 0 && s.priceCount > 0);
+        const sample = currentShops.slice(0, 4).map(s => `${s.shopName || '?'}(¥${s.avgPrice}/${s.priceCount}p)`).join(' · ');
+        console.log(`    [Price] ${currentShops.length} shops (${withPrices.length} w/ prices). Sample: ${sample}`);
+      }
+      if (newCount === 0) {
+        manualIdleRounds++;
+        if (manualIdleRounds === manualIdleLimit) {
+          console.log(`    [Manual] ~3min no new shops — keep scrolling or click 终止`);
+        }
+      } else {
+        manualIdleRounds = 0;
+      }
+      continue;
+    }
+
+    // ── Auto scroll ──
     try {
       await autoScroll(page);
       await sleep(rand(1000, 2000));
@@ -447,28 +559,24 @@ async function infiniteScrollSearch(page, keyword) {
       console.log(`    [Scroll #${totalScrolls}] scroll failed: ${e.message}. Continuing...`);
     }
 
-    // Get scrollHeight AFTER scrolling
     let currScrollH = 0;
     try { currScrollH = await page.evaluate(() => (document.body && document.body.scrollHeight) || 0); } catch (_) {}
     const scrollGrew = currScrollH > lastScrollHeight + 50;
 
     console.log(`    [Scroll #${totalScrolls}] ${allShops.size} shops (+${newCount} new) sh=${lastScrollHeight}→${currScrollH}${scrollGrew ? ' ↑' : ''}`);
 
-    // Debug: log price samples on first scroll
     if (totalScrolls === 1 && currentShops.length > 0) {
       const withPrices = currentShops.filter(s => s.avgPrice > 0 && s.priceCount > 0);
-      const sample = currentShops.slice(0, 4).map(s => `${s.shopName || '?'}(¥${s.avgPrice}=avg of ${s.priceCount}p)`).join(' · ');
+      const sample = currentShops.slice(0, 4).map(s => `${s.shopName || '?'}(¥${s.avgPrice}/${s.priceCount}p)`).join(' · ');
       console.log(`    [Price] ${currentShops.length} shops (${withPrices.length} w/ prices). Sample: ${sample}`);
     }
 
-    // ── "No progress" decision: scrollHeight didn't grow AND no new shops ──
     if (newCount === 0 && !scrollGrew) {
       noChangeRounds++;
       const threshold = 6;
       console.log(`    [Stale] ${noChangeRounds}/${threshold} no-change rounds`);
 
       if (noChangeRounds >= threshold && bounceCount < maxBounces) {
-        // ── Bounce: scroll top then bottom, rescan ──
         console.log(`    [Bounce #${bounceCount + 1}/${maxBounces}] Checking top→bottom for missed content...`);
         bounceCount++;
         try {
@@ -487,12 +595,11 @@ async function infiniteScrollSearch(page, keyword) {
           for (const s of bounceShops) {
             if (!s.shopId) continue;
             if (!allShops.has(s.shopId)) { allShops.set(s.shopId, s); bounceNew++; }
-            else { const e = allShops.get(s.shopId); if (s.followers > e.followers) allShops.set(s.shopId, s); }
+            else { const e = allShops.get(s.shopId); if (s.followers > e.followers || (s.priceCount || 0) > (e.priceCount || 0)) allShops.set(s.shopId, s); }
           }
           console.log(`    [Bounce #${bounceCount} result] ${bounceNew} new shops, ${allShops.size} total`);
 
           if (bounceNew > 0) {
-            // New content found! Reset all counters, keep scrolling
             noChangeRounds = 0;
             bounceCount = 0;
             continue;
@@ -501,7 +608,6 @@ async function infiniteScrollSearch(page, keyword) {
           if (e2.captcha) throw e2;
           console.log(`    [Bounce #${bounceCount}] Failed — ending with ${allShops.size} shops`);
         }
-        // After bounce with no new shops → if max bounces reached, truly done
         if (bounceCount >= maxBounces) {
           console.log(`    [Done] ${maxBounces} bounces found nothing — ${allShops.size} shops`);
           break;
@@ -509,24 +615,20 @@ async function infiniteScrollSearch(page, keyword) {
       }
     } else if (newCount > 0) {
       noChangeRounds = 0;
-      bounceCount = 0; // new shops found → reset bounce limit too
+      bounceCount = 0;
     }
-    // scrollGrew alone without new shops: do NOT reduce penalty
-    // This was the bug — [Loading] was trapping the loop by decrementing the counter
   }
 
   console.log(`  [4/5] Done — ${allShops.size} shops for "${keyword}"`);
-
-  // Sort by followers descending
   return [...allShops.values()].sort((a, b) => b.followers - a.followers);
 }
 
 // ── Resumable Multi-Keyword Search ─────────────────────────
 let searchState = null; // { keywords, currentIndex, allShops, seenIds, minFollowers }
 
-async function searchKeywords(keywords, minFollowers, resumeFrom = 0, minAvgPrice = 0) {
+async function searchKeywords(keywords, minFollowers, resumeFrom = 0, minAvgPrice = 0, scrollMode = 'auto') {
   if (!searchState || resumeFrom === 0) {
-    searchState = { keywords: keywords.slice(0, 10), currentIndex: 0, allShops: [], seenIds: new Set(), minFollowers, minAvgPrice };
+    searchState = { keywords: keywords.slice(0, 10), currentIndex: 0, allShops: [], seenIds: new Set(), minFollowers, minAvgPrice, scrollMode };
     clearProgress();
     resetStop();
   } else {
@@ -535,11 +637,11 @@ async function searchKeywords(keywords, minFollowers, resumeFrom = 0, minAvgPric
 
   const { allShops, seenIds } = searchState;
   const priceThreshold = searchState.minAvgPrice || 0;
+  const mode = searchState.scrollMode || 'auto';
   const kws = searchState.keywords;
-  console.log(`[SearchAll] ${kws.length} keywords (resuming from #${searchState.currentIndex + 1}): ${kws.join(', ')}`);
+  console.log(`[SearchAll] ${kws.length} keywords mode=${mode} (resuming from #${searchState.currentIndex + 1}): ${kws.join(', ')}`);
 
   for (let i = searchState.currentIndex; i < kws.length; i++) {
-    // ⚡ Check stop before each keyword
     if (stopRequested) {
       console.log(`\n  🛑 Stop requested before keyword #${i + 1} — returning results now`);
       break;
@@ -550,7 +652,7 @@ async function searchKeywords(keywords, minFollowers, resumeFrom = 0, minAvgPric
 
     let shops;
     try {
-      shops = await infiniteScrollSearch(loginPage, kw);
+      shops = await infiniteScrollSearch(loginPage, kw, mode);
     } catch (e) {
       if (e.captcha) {
         searchState.currentIndex = i;
@@ -674,30 +776,36 @@ function clearProgress() {
 }
 
 // ── Core Search ─────────────────────────────────────────────
-async function search(keyword, minFollowers, minAvgPrice = 0) {
+async function search(keyword, minFollowers, minAvgPrice = 0, scrollMode = 'auto') {
   if (!browserContext || !loginPage) throw new Error('请先点击「连接淘宝」登录后再搜索');
   resetStop();
 
   let shops;
   try {
-    shops = await infiniteScrollSearch(loginPage, keyword);
+    shops = await infiniteScrollSearch(loginPage, keyword, scrollMode);
   } catch (e) {
     if (e.captcha) throw e;
     throw e;
   }
 
   console.log(`  Total: ${shops.length} shops`);
-  const result = filterAndClassify(shops, minFollowers);
+  let filtered = shops;
+  if (minAvgPrice > 0) {
+    filtered = shops.filter(s => !(s.avgPrice > 0 && s.avgPrice < minAvgPrice));
+  }
+  const result = filterAndClassify(filtered, minFollowers);
   saveProgressFile(result, 1, 1, keyword);
-  try { await loginPage.goto('https://www.taobao.com/', { waitUntil: 'domcontentloaded', timeout: 10000 }); } catch (_) {}
+  if (scrollMode !== 'manual') {
+    try { await loginPage.goto('https://www.taobao.com/', { waitUntil: 'domcontentloaded', timeout: 10000 }); } catch (_) {}
+  }
   clearProgress();
   return result;
 }
 
-async function searchAll(keywords, minFollowers, minAvgPrice = 0) {
+async function searchAll(keywords, minFollowers, minAvgPrice = 0, scrollMode = 'auto') {
   if (!browserContext || !loginPage) throw new Error('请先点击「连接淘宝」登录后再搜索');
   resetStop();
-  return await searchKeywords(keywords, minFollowers, 0, minAvgPrice);
+  return await searchKeywords(keywords, minFollowers, 0, minAvgPrice, scrollMode);
 }
 
 // ── Export ──────────────────────────────────────────────────

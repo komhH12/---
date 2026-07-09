@@ -1,8 +1,15 @@
 node_modules/
 .browser-profile/
+.chrome-profile/
+backend/public/
+frontend/dist/
+release/
 terminals/
 agent-tools/
 search-results.json
 *.log
 .DS_Store
 Thumbs.db
+cookies_raw.txt
+debug_*.png
+debug_*.jpg
